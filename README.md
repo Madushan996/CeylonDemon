@@ -33,12 +33,15 @@ engines.
 
 ## Download
 
-Ready-to-use Windows programs are in the [`Binaries`](Binaries) folder:
+Ready-to-use Windows programs are on the
+[Releases](https://github.com/Madushan996/CeylonDemon_Chess/releases) page:
 
 - **`CeylonDemon-3.3-x86-64-avx2.exe`** works on most modern computers. Use
   this one if you're not sure.
 - **`CeylonDemon-3.3-x86-64-bmi2.exe`** can be a little faster on newer CPUs
   (Intel Haswell and later, AMD Zen 3 and later).
+- **`CeylonDemon-3.3-windows-x86-64.zip`** contains both, plus this README and
+  the licence. `SHA256SUMS-3.3.txt` lets you check the downloads.
 
 ## How to use it
 
@@ -59,6 +62,18 @@ Settings you can change in the GUI:
 The total accumilative SPRT gains across all the dev versions from 2.1 to 3.3 is around 
  350 elo points , which translates upto around 200 - 250 real elo gain over 2.0. 
 
+The approximate strength of the current version of the engine is around  **3450**.
+
+
+This is a home test, not an official rating list, so treat the number as a
+rough guide.
+
+![CeylonDemon rating progress by version](assets/Progress1.png)
+
+![CeylonDemon 3.3 results against each opponent](assets/3.3_Blitz100game%20stats.png)
+
+## Current weaknesses
+
 Because its evaluator reads every position twice, once from each king's side,
 and its code is not yet as finely optimised as the top engines, CeylonDemon is
 likely a bit slower and searches fewer positions per second. Its evaluator can
@@ -69,15 +84,6 @@ about 3700. It has no endgame tablebase support, and its network was trained
 on 400 million positions, far fewer than the billions used by leading engines.
 Most testing so far has been on a single thread on one laptop.
 
-The approximate strength of the current version of the engine is around  **3450**.
-
-
-This is a home test, not an official rating list, so treat the number as a
-rough guide.
-
-## Current weaknesses
-
-Due to it's unique evaluator architecture, it is bit slow and 
 ## Build it yourself
 
 You need GCC 12 or newer (on Windows, MSYS2 UCRT64). Then run:
