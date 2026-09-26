@@ -2,6 +2,10 @@
 
 <img src="assets/logo.png" alt="CeylonDemon" width="180">
 
+<img src="assets/sri-lanka-flag.png" alt="Flag of Sri Lanka" height="36">
+&nbsp;&nbsp;
+<img src="assets/mask.png" alt="Sri Lankan Raksha mask" height="44">
+
 # CeylonDemon 3.3
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
