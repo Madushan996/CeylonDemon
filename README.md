@@ -57,8 +57,8 @@ Settings you can change in the GUI:
 ## How strong is it?
 
 The total accumilative SPRT gains across all the dev versions from 2.1 to 3.3 is around 
- + 350, which translates upto around 200 - 250 real elo gain over 2.0. 
- 
+ 350 elo points , which translates upto around 200 - 250 real elo gain over 2.0. 
+
 Because its evaluator reads every position twice, once from each king's side,
 and its code is not yet as finely optimised as the top engines, CeylonDemon is
 likely a bit slower and searches fewer positions per second. Its evaluator can
