@@ -29,10 +29,10 @@
 // is what lets the caller pass the post-move king square unconditionally on
 // the incremental path.
 //
-// An earlier implementation computed accumulators lazily, walking a state
-// chain on demand. This engine updates eagerly in make/unmake: no accumulator stack, no per-ply computed[]
-// flags, no chain walk. The whole pre-move accumulator is saved into the Undo
-// record, so unmake is one contiguous restore and is exact by construction.
+// The 1.6 tree computed accumulators lazily, walking a state chain on demand,
+// which is what its Stockfish-derived make/unmake required. This engine
+// updates eagerly into a per-ply stack. A child is derived directly from its
+// parent with one fused pass per slice, and unmake only selects the parent.
 #pragma once
 #include <vector>
 #include "resonance_arch.h"
@@ -50,11 +50,56 @@ struct FeatureWeights {
 
 inline FeatureWeights ftw;
 inline bool weightsLoaded = false;
+inline uint64_t weightsGeneration = 1;
 
 // The four slices for one position.
 struct alignas(64) Accumulator {
     alignas(64) int16_t v[FRAME_NB][2][L1];
 };
+
+// Each mutable Position owns its refresh cache: no sharing between search
+// threads. A slot is identified by head, perspective, king bucket and mirror.
+// It stores the last board occupancy for exactly that feature coordinate frame.
+struct alignas(64) RefreshEntry {
+    alignas(64) int16_t values[L1];
+    u64 pieces[2][6];
+    uint64_t generation = 0;
+};
+struct RefreshCache {
+    RefreshEntry entries[HEAD_NB][2][KING_BUCKETS * 2];
+};
+inline void refreshCached(RefreshCache& cache, Accumulator& dst, int h, int p,
+                          const u64 byColor[2], const u64 byPiece[6], int king) {
+    const int slot = 2 * kingBucketOf(h, p, king) + int(kingMirroredFor(p, king));
+    RefreshEntry& entry = cache.entries[h][p][slot];
+    if (entry.generation != weightsGeneration) {
+        simd::copy(entry.values, ftw.ftBias[h], L1);
+        memset(entry.pieces, 0, sizeof(entry.pieces));
+        entry.generation = weightsGeneration;
+    }
+    for (int c = 0; c < 2; ++c)
+        for (int pt = 0; pt < 6; ++pt) {
+            const u64 current = byColor[c] & byPiece[pt];
+            u64 removed = entry.pieces[c][pt] & ~current;
+            u64 added = current & ~entry.pieces[c][pt];
+            while (removed) {
+                const int sq = poplsb(removed);
+                const int idx = featureIndex(h, p, king, c, pt, sq);
+                simd::subWeights(entry.values, entry.values,
+                    ftw.ftWeight[h].data() + size_t(idx) * L1, L1);
+            }
+            while (added) {
+                const int sq = poplsb(added);
+                const int idx = featureIndex(h, p, king, c, pt, sq);
+                simd::addWeights(entry.values, entry.values,
+                    ftw.ftWeight[h].data() + size_t(idx) * L1, L1);
+            }
+            entry.pieces[c][pt] = current;
+        }
+    simd::copy(dst.v[h][p], entry.values, L1);
+}
+
+struct FeatureDelta { int c, pt, sq; bool add; };
 
 // Slices are identified by a bit index so a refresh set fits in a small mask.
 constexpr int sliceBit(int h, int p) { return h * 2 + p; }
@@ -78,7 +123,7 @@ inline void refreshSlice(Accumulator& a, int h, int p, const u64 byColor[2],
             u64 b = byColor[c] & byPiece[pt];
             while (b) {
                 const int sq  = poplsb(b);
-                const int idx = featureIndex(p, anchorKsq, c, pt, sq);
+                const int idx = featureIndex(h, p, anchorKsq, c, pt, sq);
                 simd::addWeights(dst, dst, ftw.ftWeight[h].data() + size_t(idx) * L1, L1);
             }
         }
@@ -108,7 +153,9 @@ inline void addPiece(Accumulator& a, int c, int pt, int sq, int whiteKsq, int bl
         for (int p = 0; p < 2; p++) {
             if (skipMask & (1 << sliceBit(h, p))) continue;
             const int anchor = anchorColor(h, p);
-            const int idx = featureIndex(p, anchor == WHITE ? whiteKsq : blackKsq, c, pt, sq);
+            const int idx = featureIndex(h, p,
+                                         anchor == WHITE ? whiteKsq : blackKsq,
+                                         c, pt, sq);
             simd::addWeights(a.v[h][p], a.v[h][p],
                              ftw.ftWeight[h].data() + size_t(idx) * L1, L1);
         }
@@ -120,9 +167,32 @@ inline void subPiece(Accumulator& a, int c, int pt, int sq, int whiteKsq, int bl
         for (int p = 0; p < 2; p++) {
             if (skipMask & (1 << sliceBit(h, p))) continue;
             const int anchor = anchorColor(h, p);
-            const int idx = featureIndex(p, anchor == WHITE ? whiteKsq : blackKsq, c, pt, sq);
+            const int idx = featureIndex(h, p,
+                                         anchor == WHITE ? whiteKsq : blackKsq,
+                                         c, pt, sq);
             simd::subWeights(a.v[h][p], a.v[h][p],
                              ftw.ftWeight[h].data() + size_t(idx) * L1, L1);
+        }
+}
+
+inline void updateFromParent(Accumulator& dst, const Accumulator& src,
+                             const FeatureDelta* deltas, int count,
+                             int whiteKsq, int blackKsq, int skipMask = 0) {
+    for (int h = 0; h < FRAME_NB; h++)
+        for (int p = 0; p < 2; p++) {
+            if (skipMask & (1 << sliceBit(h, p))) continue;
+            const int anchor = anchorColor(h, p);
+            const int ksq = anchor == WHITE ? whiteKsq : blackKsq;
+            const int16_t* rows[4];
+            bool adds[4];
+            for (int i = 0; i < count; i++) {
+                const int idx = featureIndex(h, p, ksq, deltas[i].c,
+                                             deltas[i].pt, deltas[i].sq);
+                rows[i] = ftw.ftWeight[h].data() + size_t(idx) * L1;
+                adds[i] = deltas[i].add;
+            }
+            simd::applyWeightDeltas(dst.v[h][p], src.v[h][p],
+                                    rows, adds, count, L1);
         }
 }
 
@@ -138,7 +208,7 @@ inline int refreshMaskForKingMove(int kingColor, int fromSq, int toSq) {
     for (int h = 0; h < FRAME_NB; h++)
         for (int p = 0; p < 2; p++) {
             if (anchorColor(h, p) != kingColor) continue;
-            if (kingBucketOf(p, fromSq) != kingBucketOf(p, toSq)
+            if (kingBucketOf(h, p, fromSq) != kingBucketOf(h, p, toSq)
                 || kingMirroredFor(p, fromSq) != kingMirroredFor(p, toSq))
                 mask |= 1 << sliceBit(h, p);
         }

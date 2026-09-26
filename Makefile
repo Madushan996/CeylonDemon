@@ -9,12 +9,16 @@
 
 CXX      ?= g++
 ARCH     ?= x86-64-avx2
-EVALFILE ?= networks/ceylondemon.aa
-EXE      ?= dist/CeylonDemon-2.0-$(ARCH).exe
+EVALFILE ?= networks/ceylondemon-3.1-resonance-v12-400m-full-scratch-e8.aa
+TUNE     ?= 0
+EXE      ?= dist/CeylonDemon-3.3-$(ARCH).exe
 
 SRC := src/main.cpp
 
 CXXFLAGS := -std=c++20 -O3 -flto -pthread -DNDEBUG -Wall -Wextra -Wshadow
+ifeq ($(TUNE),1)
+    CXXFLAGS += -DCEYLON_TUNE
+endif
 LDFLAGS  := -static
 
 ifeq ($(ARCH),native)

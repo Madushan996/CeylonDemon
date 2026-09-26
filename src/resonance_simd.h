@@ -11,10 +11,10 @@
 // affine() agree exactly; there is no floating point anywhere in the forward
 // pass.
 //
-// An SSE2 path was tried and dropped: it only ever covered addWeights and
+// v1.6 also carried an SSE2 path, but it only ever covered addWeights and
 // subWeights — clippedRelu and pairwiseClipped already fell through to scalar
 // without AVX2 — so it bought very little and doubled the bit-identity surface.
-// AVX2 is the shipping target (i7-6600U, Skylake: AVX2 and fast
+// Dropped here. AVX2 is the shipping target (i7-6600U, Skylake: AVX2 and fast
 // BMI2, no AVX-512) and scalar covers portability.
 //
 // Alignment contract: `acc`, `in` and `out` buffers must be 32-byte aligned.
@@ -67,6 +67,65 @@ inline void subWeights(int16_t* dst, const int16_t* src, const int16_t* w, int n
     }
 #else
     for (int i = 0; i < n; i++) dst[i] = int16_t(src[i] - w[i]);
+#endif
+}
+
+// Fused child-accumulator update. A chess move has at most four feature
+// deltas (castling); load the parent lane once, apply every signed row in the
+// original order, then store the child lane once.
+// Resolve the two common chess-move delta patterns once per slice, so the
+// inner lane loop has no dynamic count or add/subtract branches.
+template<bool Capture>
+inline void moveWeightDeltas(int16_t* dst, const int16_t* src,
+                             const int16_t* const* w, int n) {
+#if defined(RESONANCE_AVX2)
+    for (int i = 0; i < n; i += 16) {
+        __m256i v = _mm256_load_si256(reinterpret_cast<const __m256i*>(src + i));
+        v = _mm256_sub_epi16(v, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(w[0] + i)));
+        if constexpr (Capture)
+            v = _mm256_sub_epi16(v, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(w[1] + i)));
+        v = _mm256_add_epi16(v, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(w[Capture ? 2 : 1] + i)));
+        _mm256_store_si256(reinterpret_cast<__m256i*>(dst + i), v);
+    }
+#else
+    for (int i = 0; i < n; ++i) {
+        int16_t v = int16_t(src[i] - w[0][i]);
+        if constexpr (Capture) v = int16_t(v - w[1][i]);
+        dst[i] = int16_t(v + w[Capture ? 2 : 1][i]);
+    }
+#endif
+}
+
+inline void applyWeightDeltas(int16_t* dst, const int16_t* src,
+                              const int16_t* const* weights,
+                              const bool* adds, int count, int n) {
+    if (count == 2 && !adds[0] && adds[1]) {
+        moveWeightDeltas<false>(dst, src, weights, n);
+        return;
+    }
+    if (count == 3 && !adds[0] && !adds[1] && adds[2]) {
+        moveWeightDeltas<true>(dst, src, weights, n);
+        return;
+    }
+#if defined(RESONANCE_AVX2)
+    for (int i = 0; i < n; i += 16) {
+        __m256i value = _mm256_load_si256(reinterpret_cast<const __m256i*>(src + i));
+        for (int d = 0; d < count; d++) {
+            const __m256i w = _mm256_loadu_si256(
+                reinterpret_cast<const __m256i*>(weights[d] + i));
+            value = adds[d] ? _mm256_add_epi16(value, w)
+                            : _mm256_sub_epi16(value, w);
+        }
+        _mm256_store_si256(reinterpret_cast<__m256i*>(dst + i), value);
+    }
+#else
+    for (int i = 0; i < n; i++) {
+        int16_t value = src[i];
+        for (int d = 0; d < count; d++)
+            value = int16_t(adds[d] ? value + weights[d][i]
+                                    : value - weights[d][i]);
+        dst[i] = value;
+    }
 #endif
 }
 
@@ -189,7 +248,7 @@ inline void affine(int32_t* out, const uint8_t* in, const int8_t* weights,
     // Four independent accumulators let each 32-byte input block be loaded once
     // instead of once per row. Lane accumulation order is unchanged, so the
     // integer results are bit-identical to the one-row-at-a-time form.
-    // This is the four-row path.
+    // v1.6 shipped with FC1_X4 = yes; this is that path.
     int j = 0;
     for (; j + 3 < outDim; j += 4) {
         const int8_t* row0 = weights + size_t(j) * inDim;

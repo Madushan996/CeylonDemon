@@ -14,13 +14,20 @@
 #include "position.h"
 #include "resonance_net.h"
 
+// The evaluation shrinks linearly with the fifty-move counter (to half at the
+// rule's limit), so the search prefers lines that make progress.
+constexpr int FIFTY_DAMPING_PLIES = 200;
+
 // Static evaluation from the side to move's point of view. When `sigma` is
 // given it receives the disagreement between the two frames, which the search
 // spends on window width, reductions and pruning margins.
-inline int evaluate(const Position& pos, int* sigma = nullptr) {
+inline int evaluate(const Position& pos, int* sigma = nullptr, int* residual = nullptr) {
     if (!resonance::weightsLoaded) {
         if (sigma) *sigma = 0;
+        if (residual) *residual = 0;
         return 0;
     }
-    return resonance::evaluate(pos.acc, pos.byColor, pos.byPiece, pos.stm, sigma);
+    int v = resonance::evaluate(pos.accumulator(), pos.byColor, pos.byPiece, pos.stm,
+                                sigma, residual);
+    return v * (FIFTY_DAMPING_PLIES - pos.halfmove) / FIFTY_DAMPING_PLIES;
 }

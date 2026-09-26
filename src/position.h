@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 // CeylonDemon — Copyright (C) 2026 Madushan Dissanayake. GNU GPL v3+; see LICENSE.
 // Built on the NARC Engine codebase by the same author (GPLv3).
 //
@@ -24,22 +24,22 @@ inline void initCastlePerm() {
 
 struct Undo {
     u64 key;
+    u64 pawnKey;
     int castling;
     int epSquare;
     int halfmove;
     u8  captured;
-
-    // Preserve the complete accumulator so unmake is one contiguous restore
-    // instead of recalculating and reversing every feature delta.
-    resonance::Accumulator savedAccumulator;
 };
 
-struct ScoredMove { Move move; int score; };
+// The two formerly unused padding bytes cache SEE; the entry stays 8 bytes.
+constexpr int16_t SEE_UNKNOWN = 32767;
+struct ScoredMove { Move move; int16_t exchange; int score; };
+static_assert(sizeof(ScoredMove) == 8);
 
 struct MoveList {
     ScoredMove list[256];
     int count = 0;
-    void add(Move m) { list[count++].move = m; }
+    void add(Move m) { list[count].move = m; list[count++].exchange = SEE_UNKNOWN; }
 };
 
 struct Position {
@@ -52,10 +52,69 @@ struct Position {
     int halfmove;
     int fullmove;
     u64 key;
-    resonance::Accumulator acc; // four slices: AEGIS/LANCE x white/black
+    u64 pawnKey;
+    // Search follows one mutable board down the tree. Each legal make selects
+    // the next accumulator slot; unmake selects the parent with no copy. Most
+    // child accumulators are materialized only if evaluation is actually
+    // requested at that ply.
+    resonance::Accumulator accStack[MAX_PLY + 1];
+    resonance::FeatureDelta accDeltas[MAX_PLY + 1][4];
+    u8 accDeltaCount[MAX_PLY + 1];
+    u8 accWhiteKing[MAX_PLY + 1];
+    u8 accBlackKing[MAX_PLY + 1];
+    bool accComputed[MAX_PLY + 1];
+    u8 accRefreshMask[MAX_PLY + 1];
+    u64 accRefreshColor[MAX_PLY + 1][2];
+    u64 accRefreshPiece[MAX_PLY + 1][6];
+    int accPly;
+    resonance::RefreshCache refreshCache;
+
+    void ensureAccumulator() {
+        if (!resonance::weightsLoaded || accComputed[accPly]) return;
+
+        int first = accPly;
+        while (first > 0 && !accComputed[first - 1]) first--;
+        for (int ply = first; ply <= accPly; ply++) {
+            resonance::updateFromParent(
+                accStack[ply], accStack[ply - 1], accDeltas[ply],
+                accDeltaCount[ply], accWhiteKing[ply], accBlackKing[ply],
+                accRefreshMask[ply]);
+            const int mask = accRefreshMask[ply];
+            if (mask)
+                for (int h = 0; h < resonance::HEAD_NB; ++h)
+                    for (int p = 0; p < 2; ++p)
+                        if (mask & (1 << resonance::sliceBit(h, p))) {
+                            const int king = resonance::anchorColor(h, p) == WHITE
+                                ? accWhiteKing[ply] : accBlackKing[ply];
+                            resonance::refreshCached(refreshCache, accStack[ply], h, p,
+                                accRefreshColor[ply], accRefreshPiece[ply], king);
+                        }
+            accComputed[ply] = true;
+        }
+    }
+
+    resonance::Accumulator& accumulator() {
+        ensureAccumulator();
+        return accStack[accPly];
+    }
+    const resonance::Accumulator& accumulator() const {
+        return const_cast<Position*>(this)->accumulator();
+    }
+
+    // A played root/game move becomes the new stack base. Search moves are
+    // never committed; they simply move accPly down and back up the stack.
+    void commitAccumulator() {
+        if (!resonance::weightsLoaded || accPly == 0) return;
+        ensureAccumulator();
+        memcpy(&accStack[0], &accStack[accPly], sizeof(accStack[0]));
+        accComputed[0] = true;
+        accPly = 0;
+    }
 
     void refreshAcc() {
-        resonance::refreshAll(acc, byColor, byPiece, kingSq(WHITE), kingSq(BLACK));
+        resonance::refreshAll(accStack[accPly], byColor, byPiece,
+                              kingSq(WHITE), kingSq(BLACK));
+        accComputed[accPly] = true;
     }
 
     // A move's effect on the accumulator, recorded during the board update and
@@ -65,16 +124,25 @@ struct Position {
     // bucket every index is unchanged anyway.
     //
     // Four is the worst case: castling moves a king and a rook.
-    struct AccDelta { int c, pt, sq; bool add; };
-
-    void applyAccDeltas(const AccDelta* d, int n, int skipMask) {
+    void pushAccumulator(const resonance::FeatureDelta* d, int n, int skipMask) {
+        assert(accPly < MAX_PLY);
         const int wk = kingSq(WHITE), bk = kingSq(BLACK);
-        for (int i = 0; i < n; i++) {
-            if (d[i].add) resonance::addPiece(acc, d[i].c, d[i].pt, d[i].sq, wk, bk, skipMask);
-            else          resonance::subPiece(acc, d[i].c, d[i].pt, d[i].sq, wk, bk, skipMask);
-        }
-    }
+        const int child = accPly + 1;
 
+        memcpy(accDeltas[child], d, size_t(n) * sizeof(d[0]));
+        accDeltaCount[child] = u8(n);
+        accWhiteKing[child] = u8(wk);
+        accBlackKing[child] = u8(bk);
+        accRefreshMask[child] = u8(skipMask);
+        if (skipMask) {
+            // A delayed bucket refresh must see this child's board, even if
+            // evaluation is first requested several plies further down.
+            memcpy(accRefreshColor[child], byColor, sizeof(byColor));
+            memcpy(accRefreshPiece[child], byPiece, sizeof(byPiece));
+        }
+        accComputed[child] = false;
+        accPly = child;
+    }
     // make() rebuilds the slices whose anchor king crossed a boundary.
     // unmake() does not: it restores them from the Undo record instead.
     void refreshMaskedSlices(int mask) {
@@ -84,7 +152,7 @@ struct Position {
             for (int p = 0; p < 2; p++)
                 if (mask & (1 << resonance::sliceBit(h, p))) {
                     const int anchor = resonance::anchorColor(h, p);
-                    resonance::refreshSlice(acc, h, p, byColor, byPiece,
+                    resonance::refreshCached(refreshCache, accumulator(), h, p, byColor, byPiece,
                                             anchor == WHITE ? wk : bk);
                 }
     }
@@ -99,12 +167,14 @@ struct Position {
         byPiece[pt] |= bit(sq);
         board[sq] = u8(pt);
         key ^= Zpsq[c][pt][sq];
+        if (pt == PAWN) pawnKey ^= Zpsq[c][pt][sq];
     }
     void removePiece(int c, int pt, int sq) {
         byColor[c] ^= bit(sq);
         byPiece[pt] ^= bit(sq);
         board[sq] = NO_PIECE;
         key ^= Zpsq[c][pt][sq];
+        if (pt == PAWN) pawnKey ^= Zpsq[c][pt][sq];
     }
     void movePiece(int c, int pt, int from, int to) {
         u64 ft = bit(from) | bit(to);
@@ -113,6 +183,7 @@ struct Position {
         board[from] = NO_PIECE;
         board[to] = u8(pt);
         key ^= Zpsq[c][pt][from] ^ Zpsq[c][pt][to];
+        if (pt == PAWN) pawnKey ^= Zpsq[c][pt][from] ^ Zpsq[c][pt][to];
     }
 
     u64 attackersTo(int sq, u64 occ) const {
@@ -133,10 +204,12 @@ struct Position {
     }
 
     void clear() {
-        memset(this, 0, sizeof(Position));
+        memset(byColor, 0, sizeof(byColor));
+        memset(byPiece, 0, sizeof(byPiece));
         for (int i = 0; i < 64; i++) board[i] = NO_PIECE;
-        epSquare = -1;
-        fullmove = 1;
+        stm = WHITE; epSquare = -1; castling = 0;
+        halfmove = 0; fullmove = 1; key = 0; pawnKey = 0; accPly = 0;
+        memset(accComputed, 0, sizeof(accComputed));
     }
 
     void setFen(const std::string& fen) {
@@ -180,7 +253,7 @@ struct Position {
 
     // returns false (and restores nothing-changed state) if move leaves own king in check
     bool make(Move m, Undo& u) {
-        u.key = key; u.castling = castling; u.epSquare = epSquare; u.halfmove = halfmove;
+        u.key = key; u.pawnKey = pawnKey; u.castling = castling; u.epSquare = epSquare; u.halfmove = halfmove;
         u.captured = NO_PIECE;
         int from = fromSq(m), to = toSq(m), flag = flagOf(m);
         int us = stm, them = us ^ 1;
@@ -191,11 +264,9 @@ struct Position {
         halfmove++;
 
         bool nn = resonance::weightsLoaded;
-        if (nn) memcpy(&u.savedAccumulator, &acc, sizeof(acc));
-
         // Accumulator deltas are collected here and applied once the board is
         // fully updated, so they always see the post-move king squares.
-        AccDelta d[4];
+        resonance::FeatureDelta d[4];
         int nd = 0;
         int kingFrom = -1, kingTo = -1;
 
@@ -248,13 +319,6 @@ struct Position {
             if (pt == KING) { kingFrom = from; kingTo = to; }
         }
 
-        if (nn) {
-            const int mask =
-                kingFrom >= 0 ? resonance::refreshMaskForKingMove(us, kingFrom, kingTo) : 0;
-            applyAccDeltas(d, nd, mask);
-            refreshMaskedSlices(mask);
-        }
-
         key ^= Zcastle[castling];
         castling &= castlePerm[from] & castlePerm[to];
         key ^= Zcastle[castling];
@@ -262,11 +326,19 @@ struct Position {
         stm = them;
         if (us == BLACK) fullmove++;
 
-        if (attacked(kingSq(us), them)) { unmake(m, u); return false; }
+        // Legality depends only on the board. Reject illegal pseudo-legal
+        // moves before paying for any neural accumulator work.
+        if (attacked(kingSq(us), them)) { unmake(m, u, false); return false; }
+
+        if (nn) {
+            const int mask =
+                kingFrom >= 0 ? resonance::refreshMaskForKingMove(us, kingFrom, kingTo) : 0;
+            pushAccumulator(d, nd, mask);
+        }
         return true;
     }
 
-    void unmake(Move m, const Undo& u) {
+    void unmake(Move m, const Undo& u, bool accumulatorAdvanced = true) {
         int from = fromSq(m), to = toSq(m), flag = flagOf(m);
         int them = stm, us = stm ^ 1; // us = side that moved
         bool nn = resonance::weightsLoaded;
@@ -297,13 +369,13 @@ struct Position {
 
         stm = us;
         if (us == BLACK) fullmove--;
-        key = u.key; castling = u.castling; epSquare = u.epSquare; halfmove = u.halfmove;
+        key = u.key; pawnKey = u.pawnKey; castling = u.castling; epSquare = u.epSquare; halfmove = u.halfmove;
 
-        if (nn) memcpy(&acc, &u.savedAccumulator, sizeof(acc));
+        if (nn && accumulatorAdvanced) accPly--;
     }
 
     void makeNull(Undo& u) {
-        u.key = key; u.castling = castling; u.epSquare = epSquare; u.halfmove = halfmove;
+        u.key = key; u.pawnKey = pawnKey; u.castling = castling; u.epSquare = epSquare; u.halfmove = halfmove;
         u.captured = NO_PIECE;
         key ^= Zside;
         if (epSquare != -1) { key ^= ZepFile[fileOf(epSquare)]; epSquare = -1; }
@@ -312,7 +384,7 @@ struct Position {
     }
     void unmakeNull(const Undo& u) {
         stm ^= 1;
-        key = u.key; castling = u.castling; epSquare = u.epSquare; halfmove = u.halfmove;
+        key = u.key; pawnKey = u.pawnKey; castling = u.castling; epSquare = u.epSquare; halfmove = u.halfmove;
     }
 
     bool isCapture(Move m) const {

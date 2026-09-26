@@ -10,7 +10,13 @@
 
 param(
     [ValidateSet('x86-64-avx2', 'x86-64-bmi2', 'native')]
-    [string]$Arch = 'x86-64-avx2'
+    [string]$Arch = 'x86-64-avx2',
+
+    [switch]$Tune,
+
+    [string]$EvalFile = '',
+
+    [string]$Output = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,12 +30,24 @@ if (-not (Test-Path -LiteralPath $compiler)) { throw "Compiler not found: $compi
 
 $env:PATH = "$toolchain;$env:PATH"
 
-$net = Join-Path $workspace 'networks\ceylondemon.aa'
+$net = if ($EvalFile) {
+    [IO.Path]::GetFullPath((Join-Path $workspace $EvalFile))
+} else {
+    Join-Path $workspace 'networks\ceylondemon-3.1-resonance-v12-400m-full-scratch-e8.aa'
+}
 if (-not (Test-Path -LiteralPath $net)) { throw "Network not found: $net" }
 
 $distDir = Join-Path $workspace 'dist'
 New-Item -ItemType Directory -Force -Path $distDir | Out-Null
-$output = Join-Path $distDir "CeylonDemon-2.0-$Arch.exe"
+$outputPath = if ($Output) {
+    [IO.Path]::GetFullPath((Join-Path $workspace $Output))
+} else {
+    Join-Path $distDir "CeylonDemon-3.3-$Arch.exe"
+}
+if ($Tune -and -not $Output) {
+    $outputPath = Join-Path $distDir "CeylonDemon-3.3-$Arch-tune.exe"
+}
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $outputPath) | Out-Null
 
 switch ($Arch) {
     'native'       { $archFlags = @('-march=native') }
@@ -49,10 +67,12 @@ try {
     $args = @(
         '-std=c++20','-O3','-flto','-static','-pthread','-DNDEBUG',
         '-Wall','-Wextra','-Wshadow'
-    ) + $archFlags + @(
-        '-DCEYLON_EMBEDDED_NET=ceylondemon.aa',
-        "-Wa,-I$(Join-Path $workspace 'networks')",
-        '-o', $output,
+    ) + $archFlags
+    if ($Tune) { $args += '-DCEYLON_TUNE' }
+    $args += @(
+        "-DCEYLON_EMBEDDED_NET=$([IO.Path]::GetFileName($net))",
+        "-Wa,-I$([IO.Path]::GetDirectoryName($net))",
+        '-o', $outputPath,
         (Join-Path $workspace 'src\main.cpp')
     )
     if ($resourceObject) { $args += $resourceObject }
@@ -66,5 +86,5 @@ finally {
     }
 }
 
-$size = [math]::Round((Get-Item $output).Length / 1MB, 1)
-Write-Host "Build complete: $output ($size MB, network embedded)"
+$size = [math]::Round((Get-Item $outputPath).Length / 1MB, 1)
+Write-Host "Build complete: $outputPath ($size MB, network embedded)"

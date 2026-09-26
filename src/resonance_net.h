@@ -2,7 +2,7 @@
 // CeylonDemon — Copyright (C) 2026 Madushan Dissanayake.
 // Licensed under the GNU GPL v3 or later; see LICENSE.
 //
-// resonance_net.h — dense stack, blend gate, sigma, and the .aa loader.
+// resonance_net.h — dense stack, interaction residual, sigma, and .aa loader.
 //
 // The forward pass, per head, per output bucket:
 //
@@ -14,8 +14,9 @@
 //               -> clipped activation (64)
 //               -> FC3   64 -> 1
 //
-// Both heads run it; the scalars are blended by a per-bucket learned gate, and
-// their absolute difference is sigma.
+// Both heads run it; the scalars are blended by a per-bucket learned gate. A
+// rank-8 product branch then reads the two 64-value hidden contexts and adds a
+// bounded correction. The experts' absolute scalar difference remains sigma.
 //
 // Every rescale rounds to nearest rather than truncating. An arithmetic shift
 // alone biases every activation downwards and the bias compounds through the
@@ -44,15 +45,22 @@ namespace resonance {
 
 // Evaluations are kept inside this band so they never collide with mate scores.
 //
-// Derived from this engine's own score constants, so it sits strictly inside
-// the mate band and an evaluation can never be mistaken for a mate score.
+// 2.0 CHANGE — the last inherited constant is gone. Through 1.11 this was
+// 31506, carried from the 1.6 tree, where it was Stockfish's evaluation clamp
+// (VALUE_TB_WIN_IN_MAX_PLY - 1 = 32000 - 246 - 1 - 246 - 1). That value is
+// only safe under Stockfish's score scale, where mate is 32000 and the mate
+// threshold is 31754, so 31506 sits below both.
 //
-// A bound borrowed from an engine with a different score scale would not be
-// safe here: this engine uses MATE = 30000, MATE_BOUND = 29000 and
-// INF = 31000, so any clamp above those would let an evaluation exceed INF and
-// be reported as a mate score by scoreString() and shifted by ply in
-// scoreToTT(). Deriving the bound locally makes that impossible by
-// construction.
+// It is not safe here. This engine uses MATE = 30000, MATE_BOUND = 29000 and
+// INF = 31000, so a clamp at 31506 sat *above* all three: an evaluation at the
+// bound would have exceeded INF and been reported as a mate score by
+// scoreString() and shifted by ply in scoreToTT(). No reachable position
+// produces an evaluation near it with the shipped network, so nothing observed
+// ever depended on it, but the relationship was inverted.
+//
+// Derived from this engine's own constants instead: strictly inside the mate
+// band, so an evaluation can never be mistaken for a mate score by
+// construction rather than by the coincidence of a foreign scale.
 constexpr int EVAL_LIMIT = MATE_BOUND - 1; // 28999
 
 // ----------------------------------------------------------------------------
@@ -74,6 +82,84 @@ struct DenseWeights {
 };
 
 inline DenseWeights dw;
+
+// Resonance v12's interaction branch. Arrays are stored per output bucket so
+// the residual can specialize by material phase. They can be trained alone or
+// jointly with the parent evaluator, as in the CeylonDemon 2.8 checkpoint.
+struct InteractionWeights {
+    alignas(64) int8_t  aegisProjection[OUTPUT_BUCKETS][INTERACTION_RANK * INTERACTION_IN];
+    alignas(64) int32_t aegisBias      [OUTPUT_BUCKETS][INTERACTION_RANK];
+    alignas(64) int8_t  lanceProjection[OUTPUT_BUCKETS][INTERACTION_RANK * INTERACTION_IN];
+    alignas(64) int32_t lanceBias      [OUTPUT_BUCKETS][INTERACTION_RANK];
+    alignas(64) int8_t  outputWeight   [OUTPUT_BUCKETS][INTERACTION_RANK];
+    int32_t             outputBias     [OUTPUT_BUCKETS];
+};
+
+inline InteractionWeights iw;
+
+// Runtime-only packing; serialized network and learned values stay intact.
+alignas(64) inline int8_t packedFc2[HEAD_NB][OUTPUT_BUCKETS][FC2_OUT * FC2_IN];
+inline void packDenseWeights() {
+    for (int h = 0; h < HEAD_NB; ++h)
+        for (int b = 0; b < OUTPUT_BUCKETS; ++b)
+            for (int o = 0; o < FC2_OUT; o += 8)
+                for (int i = 0; i < FC2_IN; i += 4)
+                    for (int lane = 0; lane < 8; ++lane)
+                        for (int k = 0; k < 4; ++k)
+                            packedFc2[h][b][o * FC2_IN + i * 8 + lane * 4 + k]
+                                = dw.fc2Weight[h][b][(o + lane) * FC2_IN + i + k];
+}
+
+// Eight FC2 outputs occupy eight int32 lanes. Clip and consume in FC3,
+// avoiding scalar horizontal reductions and intermediate activation arrays.
+// maddubs cannot saturate: inputs <=127, int8 weights => [-32512,32258].
+inline int32_t fusedTail(const uint8_t* input, int h, int b,
+                         uint8_t* policyContext) {
+#if defined(RESONANCE_AVX2)
+    const __m256i ones = _mm256_set1_epi16(1);
+    const __m256i round = _mm256_set1_epi32(1 << (WEIGHT_SCALE_BITS - 1));
+    const __m256i zero = _mm256_setzero_si256();
+    const __m256i cap = _mm256_set1_epi32(ACTIVATION_CLIP);
+    __m256i total = zero;
+    for (int o = 0; o < FC2_OUT; o += 8) {
+        __m256i value = _mm256_load_si256(
+            reinterpret_cast<const __m256i*>(dw.fc2Bias[h][b] + o));
+        for (int i = 0; i < FC2_IN; i += 4) {
+            int32_t word;
+            memcpy(&word, input + i, sizeof(word));
+            const __m256i x = _mm256_set1_epi32(word);
+            const __m256i w = _mm256_load_si256(
+                reinterpret_cast<const __m256i*>(packedFc2[h][b] + o * FC2_IN + i * 8));
+            value = _mm256_add_epi32(value,
+                _mm256_madd_epi16(_mm256_maddubs_epi16(x, w), ones));
+        }
+        value = _mm256_srai_epi32(_mm256_add_epi32(value, round), WEIGHT_SCALE_BITS);
+        value = _mm256_min_epi32(_mm256_max_epi32(value, zero), cap);
+        if (policyContext) {
+            alignas(32) int32_t lanes[8];
+            _mm256_store_si256(reinterpret_cast<__m256i*>(lanes), value);
+            for (int lane = 0; lane < 8; ++lane)
+                policyContext[o + lane] = uint8_t(lanes[lane]);
+        }
+        const __m128i w8 = _mm_loadl_epi64(
+            reinterpret_cast<const __m128i*>(dw.fc3Weight[h][b] + o));
+        total = _mm256_add_epi32(total,
+            _mm256_mullo_epi32(value, _mm256_cvtepi8_epi32(w8)));
+    }
+    return dw.fc3Bias[h][b] + simd::horizontalSum(total);
+#else
+    alignas(64) int32_t hidden[FC2_OUT];
+    simd::affine(hidden, input, dw.fc2Weight[h][b], dw.fc2Bias[h][b], FC2_IN, FC2_OUT);
+    int32_t out = dw.fc3Bias[h][b];
+    for (int i = 0; i < FC2_OUT; ++i) {
+        const int y = std::clamp((hidden[i] + (1 << (WEIGHT_SCALE_BITS - 1)))
+                                  >> WEIGHT_SCALE_BITS, 0, ACTIVATION_CLIP);
+        if (policyContext) policyContext[i] = uint8_t(y);
+        out += y * int32_t(dw.fc3Weight[h][b][i]);
+    }
+    return out;
+#endif
+}
 inline std::string loadedFrom;
 
 // ----------------------------------------------------------------------------
@@ -104,6 +190,7 @@ private:
 //   per frame:            ftBias[L1], ftWeight[FEATURE_DIM * L1]
 //   per head, per bucket: fc1 weight+bias, fc2 weight+bias, fc3 weight+bias
 //   gate[OUTPUT_BUCKETS]
+//   per bucket: A projection+bias, L projection+bias, output weight+bias
 //
 // The policy head lives in a separate .aap file and is not read here.
 // ----------------------------------------------------------------------------
@@ -155,7 +242,18 @@ inline bool loadFromMemory(const unsigned char* data, size_t size, const std::st
 
     if (!in.read(dw.gate, OUTPUT_BUCKETS)) return false;
 
+    for (int b = 0; b < OUTPUT_BUCKETS; ++b) {
+        if (!in.read(iw.aegisProjection[b], INTERACTION_RANK * INTERACTION_IN)) return false;
+        if (!in.read(iw.aegisBias[b], INTERACTION_RANK)) return false;
+        if (!in.read(iw.lanceProjection[b], INTERACTION_RANK * INTERACTION_IN)) return false;
+        if (!in.read(iw.lanceBias[b], INTERACTION_RANK)) return false;
+        if (!in.read(iw.outputWeight[b], INTERACTION_RANK)) return false;
+        if (!in.read(&iw.outputBias[b], 1)) return false;
+    }
+
+    packDenseWeights();
     loadedFrom    = name;
+    ++weightsGeneration;
     weightsLoaded = true;
     return true;
 }
@@ -172,8 +270,8 @@ inline bool loadFromFile(const std::string& path) {
     return loadFromMemory(blob.data(), blob.size(), path);
 }
 
-// The shipping build links the network into the executable, so a release
-// stays a single self-contained file. Without it, fall back
+// The shipping build links the network into the executable, exactly as 1.6
+// did, so a release stays a single self-contained file. Without it, fall back
 // to finding the .aa on disk.
 inline bool loadEmbedded() {
 #if defined(CEYLON_EMBEDDED_NET)
@@ -194,8 +292,8 @@ inline int32_t propagate(const Accumulator& acc, int h, int us, int b,
     alignas(64) uint8_t activations[FC1_IN];
     alignas(64) int32_t fc1Out[FC1_OUT];
     alignas(64) uint8_t fc2In[FC2_IN];
-    alignas(64) int32_t fc2Out[FC2_OUT];
-    alignas(64) uint8_t fc3In[FC3_IN];
+
+
 
     // Side to move first, so the network always sees "us, then them". Each
     // perspective contributes L1/2 pairwise products rather than L1 raw
@@ -218,22 +316,39 @@ inline int32_t propagate(const Accumulator& acc, int h, int us, int b,
         fc2In[FC1_OUT + i] = uint8_t((y * y + 64) >> 7);
     }
 
-    simd::affine(fc2Out, fc2In, dw.fc2Weight[h][b], dw.fc2Bias[h][b], FC2_IN, FC2_OUT);
-
-    for (int i = 0; i < FC2_OUT; i++) {
-        int y = (fc2Out[i] + ROUND) >> WEIGHT_SCALE_BITS;
-        fc3In[i] = uint8_t(y < 0 ? 0 : (y > ACTIVATION_CLIP ? ACTIVATION_CLIP : y));
-    }
-
-    if (policyContext) memcpy(policyContext, fc3In, FC3_IN);
-
-    int32_t out = dw.fc3Bias[h][b];
-    for (int i = 0; i < FC3_IN; i++) out += int32_t(dw.fc3Weight[h][b][i]) * int32_t(fc3In[i]);
+    int32_t out = fusedTail(fc2In, h, b, policyContext);
 
     // The trainer scales the final layer so that dividing by the weight quant
     // lands directly in the engine's internal evaluation units. Integer
     // division truncates toward zero, so the rounding term carries the sign.
     return (out + (out >= 0 ? FC_QUANT / 2 : -FC_QUANT / 2)) / FC_QUANT;
+}
+
+// Project the two frozen hidden contexts into eight channels, multiply the
+// paired activations, and read out a signed correction. The scalar product and
+// final dot intentionally stay scalar: the rank is smaller than the 32-byte
+// width required by the AVX2 pairwise helper.
+inline int32_t interactionResidual(const uint8_t* aegisContext,
+                                   const uint8_t* lanceContext, int b) {
+    alignas(64) int32_t aegisRaw[INTERACTION_RANK];
+    alignas(64) int32_t lanceRaw[INTERACTION_RANK];
+    simd::affine(aegisRaw, aegisContext, iw.aegisProjection[b], iw.aegisBias[b],
+                 INTERACTION_IN, INTERACTION_RANK);
+    simd::affine(lanceRaw, lanceContext, iw.lanceProjection[b], iw.lanceBias[b],
+                 INTERACTION_IN, INTERACTION_RANK);
+
+    int32_t total = iw.outputBias[b];
+    for (int i = 0; i < INTERACTION_RANK; ++i) {
+        const int a = std::clamp((aegisRaw[i] + FC_QUANT / 2) >> WEIGHT_SCALE_BITS,
+                                 0, ACTIVATION_CLIP);
+        const int l = std::clamp((lanceRaw[i] + FC_QUANT / 2) >> WEIGHT_SCALE_BITS,
+                                 0, ACTIVATION_CLIP);
+        const int product = (a * l + 64) >> 7;
+        total += int32_t(iw.outputWeight[b][i]) * product;
+    }
+
+    int32_t residual = (total + (total >= 0 ? FC_QUANT / 2 : -FC_QUANT / 2)) / FC_QUANT;
+    return std::clamp(residual, -RESIDUAL_LIMIT, RESIDUAL_LIMIT);
 }
 
 // ----------------------------------------------------------------------------
@@ -242,13 +357,14 @@ inline int32_t propagate(const Accumulator& acc, int h, int us, int b,
 // Material already says the position is winning; this only breaks shallow
 // search ties toward the standard mating plan: confine, then approach.
 //
-// PROVENANCE: the two constants below (64 and 16) are carried forward from
-// earlier development and were not re-derived by measurement in this codebase.
-// The pattern itself — an edge-distance term plus a king-proximity term — is
-// the standard "mop-up" evaluation described in the general chess-programming
-// literature and predates any one engine; the implementation here is written
-// against this engine's own board accessors. Flagged in NOTICE.md rather than
-// presented as original work.
+// PROVENANCE: the two constants below (64 and 16) and the confine-then-
+// approach shape are carried forward from the 1.6 tree, which was
+// Stockfish-derived. The pattern itself — an edge-distance term plus a
+// king-proximity term — is the standard "mop-up" evaluation described in the
+// general chess-programming literature and predates any one engine; the
+// implementation here is written against this engine's own board accessors.
+// The specific values were not re-derived by measurement in this codebase.
+// Flagged in NOTICE.md rather than presented as original work.
 // ----------------------------------------------------------------------------
 
 constexpr int MOPUP_EDGE     = 64;
@@ -275,7 +391,7 @@ inline int loneKingMopup(const u64 byColor[2], const u64 byPiece[6], int stm) {
     if (wr < edgeDistance) edgeDistance = wr;
     if (7 - wr < edgeDistance) edgeDistance = 7 - wr;
 
-    // Chebyshev king distance.
+    // Chebyshev king distance, matching v1.6's distance<Square>.
     const int df = fileOf(strongKing) - wf, dr = rankOf(strongKing) - wr;
     const int af = df < 0 ? -df : df, ar = dr < 0 ? -dr : dr;
     const int kingDistance = af > ar ? af : ar;
@@ -289,21 +405,27 @@ inline int loneKingMopup(const u64 byColor[2], const u64 byPiece[6], int stm) {
 // ----------------------------------------------------------------------------
 
 inline int evaluate(const Accumulator& acc, const u64 byColor[2], const u64 byPiece[6],
-                    int stm, int* sigma = nullptr) {
+                    int stm, int* sigma = nullptr, int* residualOut = nullptr) {
     const int b = outputBucket(popcount(byColor[WHITE] | byColor[BLACK]));
 
-    const int32_t aegis = propagate(acc, HEAD_AEGIS, stm, b);
-    const int32_t lance = propagate(acc, HEAD_LANCE, stm, b);
+    alignas(64) uint8_t aegisContext[INTERACTION_IN];
+    alignas(64) uint8_t lanceContext[INTERACTION_IN];
+    const int32_t aegis = propagate(acc, HEAD_AEGIS, stm, b, aegisContext);
+    const int32_t lance = propagate(acc, HEAD_LANCE, stm, b, lanceContext);
 
     // The residual between the defensive and offensive readings is the whole
     // point of running two heads: it is large exactly where a single scalar
-    // evaluation is least trustworthy, and the search spends it on wider
-    // windows and softer reductions.
+    // evaluation is least trustworthy. It is reported for diagnostics and
+    // future search work; the 2.8 search does not consume it.
     if (sigma) *sigma = aegis > lance ? aegis - lance : lance - aegis;
 
     int g = int(dw.gate[b]);
     g = g < 0 ? 0 : (g > 256 ? 256 : g);
     int32_t blended = (aegis * g + lance * (256 - g)) / 256;
+
+    const int32_t residual = interactionResidual(aegisContext, lanceContext, b);
+    if (residualOut) *residualOut = residual;
+    blended += residual;
 
     blended += loneKingMopup(byColor, byPiece, stm);
 

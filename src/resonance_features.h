@@ -15,12 +15,12 @@
 // The frames differ only in which king anchors them: AEGIS on the perspective
 // side's own king, LANCE on the opponent's.
 //
-// NOTE ON NUMBERING: the trainer that produced the shipped networks numbers
-// PAWN = 1, following the Stockfish NNUE convention, so its index needed
+// PROVENANCE NOTE: the 1.6 tree was Stockfish-derived and inherited its
+// PieceType numbering, where PAWN = 1, so the index there needed
 // `type_of(pc) - 1`. This engine numbers PAWN = 0 and uses the piece type
-// directly. The resulting feature index is identical, which is what allows
-// those networks to load unchanged; a differential test covers all
-// 64 x 64 x 12 x 2 combinations. See NOTICE.md.
+// directly. The resulting feature index is identical, which is what allows a
+// network trained under the old numbering to load unchanged; a differential
+// test covers all 64 x 64 x 12 x 2 combinations. See NOTICE.md.
 #pragma once
 #include "resonance_arch.h"
 #include "types.h"
@@ -31,7 +31,7 @@ namespace resonance {
 // Ranks 1-2 get fine resolution across files a-d (that is where castling
 // structure lives); the rest coarsen into rank pairs.
 // clang-format off
-constexpr uint8_t KING_BUCKET[64] = {
+constexpr uint8_t AEGIS_KING_BUCKET[64] = {
     0, 1, 2, 3,  3, 2, 1, 0,
     0, 1, 2, 3,  3, 2, 1, 0,
     4, 4, 5, 5,  5, 5, 4, 4,
@@ -41,7 +41,23 @@ constexpr uint8_t KING_BUCKET[64] = {
     8, 8, 9, 9,  9, 9, 8, 8,
     8, 8, 9, 9,  9, 9, 8, 8,
 };
+constexpr uint8_t LANCE_KING_BUCKET[64] = {
+    8, 8, 9, 9,  9, 9, 8, 8,
+    8, 8, 9, 9,  9, 9, 8, 8,
+    6, 6, 7, 7,  7, 7, 6, 6,
+    6, 6, 7, 7,  7, 7, 6, 6,
+    4, 4, 5, 5,  5, 5, 4, 4,
+    4, 4, 5, 5,  5, 5, 4, 4,
+    0, 1, 2, 3,  3, 2, 1, 0,
+    0, 1, 2, 3,  3, 2, 1, 0,
+};
 // clang-format on
+
+inline int kingBucketForHead(int head, int relativeKing) {
+    return int(head == HEAD_LANCE
+        ? LANCE_KING_BUCKET[relativeKing]
+        : AEGIS_KING_BUCKET[relativeKing]);
+}
 
 // Square as seen from `persp`: black flips the board vertically.
 inline int relativeSquare(int persp, int sq) { return sq ^ (persp * 56); }
@@ -60,7 +76,7 @@ inline int anchorColor(int h, int persp) { return h == HEAD_AEGIS ? persp : pers
 
 // Feature index for a piece of type `pt` and colour `pc` standing on `sq`,
 // read from `persp`, with the frame anchored on the king at `ksq`.
-inline int featureIndex(int persp, int ksq, int pc, int pt, int sq) {
+inline int featureIndex(int head, int persp, int ksq, int pc, int pt, int sq) {
     int relK = relativeSquare(persp, ksq);
     int relS = relativeSquare(persp, sq);
 
@@ -69,7 +85,7 @@ inline int featureIndex(int persp, int ksq, int pc, int pt, int sq) {
         relS = flipFile(relS);
     }
 
-    const int bucket     = int(KING_BUCKET[relK]);
+    const int bucket     = kingBucketForHead(head, relK);
     const int pieceClass = (pc == persp ? 0 : 6) + pt;
 
     return (bucket * PIECE_CLASSES + pieceClass) * 64 + relS;
@@ -78,9 +94,9 @@ inline int featureIndex(int persp, int ksq, int pc, int pt, int sq) {
 // Which king bucket a frame anchored at `ksq` reads from `persp`, and whether
 // it is mirrored. The accumulator must be fully refreshed whenever either
 // changes, because every feature index in the frame shifts.
-inline int kingBucketOf(int persp, int ksq) {
+inline int kingBucketOf(int head, int persp, int ksq) {
     const int relK = relativeSquare(persp, ksq);
-    return int(KING_BUCKET[mirrored(relK) ? flipFile(relK) : relK]);
+    return kingBucketForHead(head, mirrored(relK) ? flipFile(relK) : relK);
 }
 
 inline bool kingMirroredFor(int persp, int ksq) {

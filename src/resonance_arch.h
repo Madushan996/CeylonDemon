@@ -25,20 +25,27 @@
 //
 //       eval  = (gate * AEGIS + (256 - gate) * LANCE) / 256
 //
-// The interesting part is not the blend but the residual:
+// Resonance v12 also lets the final 64-value hidden contexts interact before
+// they are discarded. Two rank-8 projections are multiplied channel by
+// channel and read out as a bounded correction to the scalar blend. The v12
+// format supports either a frozen-parent branch experiment or full end-to-end
+// training; CeylonDemon 2.8 uses the latter from random weights.
+//
+// The diagnostic disagreement between the scalar experts is:
 //
 //       sigma = |AEGIS - LANCE|
 //
 // Sigma measures how much the two frames disagree. It is large exactly where
 // evaluation is least trustworthy: sharp positions where a defensive reading
-// and an offensive reading diverge. The search consumes sigma directly to
-// soften late move reductions in that high-disagreement tail, preserving a ply
-// where a single scalar eval is least reliable.
+// and an offensive reading diverge. It is exposed for diagnostics and future
+// search work; the 2.8 search does not consume it because the tested
+// sigma-aware candidates did not pass their strength gates.
 //
 // ---------------------------------------------------------------------------
-// This header targets Resonance v10 only — the shipped champion. Earlier
-// development carried #ifdef variants for v1..v9; those are not reproduced
-// here. Carrying dead architectures into a clean tree buys nothing.
+// This header targets Resonance v12 only — the 2.8 full-scratch release.
+// v12 retains v11's vertically reversed LANCE bucket table and adds a compact
+// hidden-context interaction residual. Earlier formats remain available in
+// their tagged releases rather than through conditionals in the current engine.
 // ---------------------------------------------------------------------------
 #pragma once
 #include "types.h"
@@ -85,6 +92,13 @@ constexpr int FC2_IN  = 2 * FC1_OUT;  // clipped + squared-clipped activations
 constexpr int FC2_OUT = 64;
 constexpr int FC3_IN  = FC2_OUT;
 
+// Low-rank interaction over the two final hidden contexts. The branch is
+// deliberately small: it adds no accumulator state and only 1,032 dense MACs
+// plus eight pair products per evaluation.
+constexpr int INTERACTION_IN   = FC3_IN;
+constexpr int INTERACTION_RANK = 8;
+constexpr int RESIDUAL_LIMIT   = 208;
+
 // The two frames. v10 accumulates each independently.
 enum Head : int { HEAD_AEGIS = 0, HEAD_LANCE = 1, HEAD_NB = 2 };
 constexpr int FRAME_NB = HEAD_NB;
@@ -111,11 +125,14 @@ constexpr int OUTPUT_SCALE = 16;
 // ----------------------------- File format ----------------------------------
 
 constexpr uint32_t NET_MAGIC   = 0x414E5441u; // "ANTA"
-constexpr uint32_t NET_VERSION = 0x000E0000u; // dual 320-lane frames, 64-wide heads
+constexpr uint32_t NET_VERSION = 0x00100000u;
+constexpr uint32_t ARCH_MARKER = 0x49523132u; // "IR12": interaction residual v12
+constexpr const char* NET_NAME = "Resonance v12";
+constexpr const char* ENGINE_NAME = "CeylonDemon 3.3";
 
 // A quick digest of the architecture; the loader refuses mismatched files.
-// The mixed constants and their order must match the trainer's writer exactly
-// or every existing .aa file stops loading.
+// The mixed constants and their order must match the v1.6 writer exactly or
+// every existing .aa file stops loading.
 constexpr uint32_t archHash() {
     uint32_t h = 2166136261u;
     auto mix = [&h](uint32_t x) {
@@ -129,7 +146,10 @@ constexpr uint32_t archHash() {
     mix(uint32_t(FC1_OUT));
     mix(uint32_t(FC2_OUT));
     mix(uint32_t(HEAD_NB));
-    mix(0x44463330u); // "DF30": dual-frame 320-lane structured prune
+    mix(uint32_t(INTERACTION_IN));
+    mix(uint32_t(INTERACTION_RANK));
+    mix(uint32_t(RESIDUAL_LIMIT));
+    mix(ARCH_MARKER);
     return h;
 }
 
