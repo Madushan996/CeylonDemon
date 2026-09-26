@@ -72,6 +72,8 @@ rough guide.
 
 ![CeylonDemon 3.3 results against each opponent](assets/3.3_Blitz100game%20stats.png)
 
+PLEASE NOT THAT THE STRENGTH OF THE ENGINE WAS ONLY MEASURED IN SHORT TIME CONTROLS, THE PLAYING STRENGTH CAN BE SIGNIFICANTLY BETTER IN LONGER TIME CONTROLS.  
+
 ## Current weaknesses
 
 Because its evaluator reads every position twice, once from each king's side,
