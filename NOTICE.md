@@ -120,8 +120,7 @@ link:
 
 Parts of this project were developed with AI coding assistants — **OpenAI
 Codex, used within Visual Studio Code**, and **Anthropic's Claude Code** — to
-accelerate implementation and testing. This is recorded here alongside the
-project's other provenance statements.
+accelerate implementation, testing and to write boring ReadMe's like this one. 
 
 Scope and limits of that assistance:
 
@@ -137,8 +136,7 @@ Scope and limits of that assistance:
 - Tool assistance transfers neither authorship nor licence obligations. The
   work remains the author's, under GPLv3.
 
-Documentation in this repository, including parts of `README.md` and this file,
-was likewise drafted with AI assistance.
+Also this boring readMe file was written using Claude. 
 
 ## 7. Credit
 
