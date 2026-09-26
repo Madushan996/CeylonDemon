@@ -69,6 +69,9 @@ about 3700. It has no endgame tablebase support, and its network was trained
 on 400 million positions, far fewer than the billions used by leading engines.
 Most testing so far has been on a single thread on one laptop.
 
+The approximate strength of the current version of the engine is around  **3450**.
+
+
 This is a home test, not an official rating list, so treat the number as a
 rough guide.
 
