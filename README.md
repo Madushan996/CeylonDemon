@@ -1,12 +1,10 @@
 <div align="center">
 
-<img src="assets/logo.png" alt="CeylonDemon" width="180">
+<img src="assets/logo-3.3.jpg" alt="CeylonDemon" width="300">
 
 # CeylonDemon 3.3
 
-![Made in Sri Lanka](assets/badge-sri-lanka.svg)
-![Inspired by යකා වෙස්මූණ](assets/badge-raksha.svg)
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+![Made in Sri Lanka](assets/badge-sri-lanka.svg) ![Inspired by යකා වෙස්මූණ](assets/badge-raksha.svg) [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
 </div>
 
@@ -17,6 +15,7 @@ A chess engine is a computer program designed to play chess. A chess engine has
 two main parts: **search** and **evaluation**. The search looks ahead at the
 moves that can be played from the current position, and the replies to those
 moves, and so on. The evaluator judges how good each resulting position is.
+
 
 CeylonDemon's evaluator is a **dual-frame NNUE** (a small, fast neural network)
 called **Resonance**. Most engines judge a position from one point of view.
