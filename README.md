@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/logo-3.3.jpg" alt="CeylonDemon" width="300">
+<img src="assets/logo-3.3.png" alt="CeylonDemon" width="280">
 
 # CeylonDemon 3.3
 
