@@ -4,7 +4,7 @@
 
 # CeylonDemon 3.3
 
-![Made in Sri Lanka](assets/badge-sri-lanka.svg) ![Inspired by යකා වෙස්මූණ](assets/badge-raksha.svg) [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+![Made in Sri Lanka](assets/badge-sri-lanka.svg) ![Inspired by යකා වෙස්මූණ](assets/badge-raksha.svg) [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE) [![Downloads](https://img.shields.io/github/downloads/Madushan996/CeylonDemon/total)](https://github.com/Madushan996/CeylonDemon/releases)
 
 </div>
 
