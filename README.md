@@ -1,10 +1,12 @@
 <div align="center">
 
-<img src="assets/logo.png" alt="CeylonDemon" width="180">
 
-<img src="assets/sri-lanka-flag.png" alt="Flag of Sri Lanka" height="36">
+
+<img src="assets/sri-lanka-flag.png" alt="Flag of Sri Lanka" height="20">
 &nbsp;&nbsp;
-<img src="assets/mask.png" alt="Sri Lankan Raksha mask" height="44">
+
+<img src="assets/logo.png" alt="CeylonDemon" width="180">
+<img src="assets/mask.png" alt="Sri Lankan Raksha mask" height="26">
 
 # CeylonDemon 3.3
 
