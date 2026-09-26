@@ -1,15 +1,11 @@
 <div align="center">
 
-
-
-<img src="assets/sri-lanka-flag.png" alt="Flag of Sri Lanka" height="20">
-&nbsp;&nbsp;
-
 <img src="assets/logo.png" alt="CeylonDemon" width="180">
-<img src="assets/mask.png" alt="Sri Lankan Raksha mask" height="26">
 
 # CeylonDemon 3.3
 
+![Made in Sri Lanka](assets/badge-sri-lanka.svg)
+![Inspired by යකා වෙස්මූණ](assets/badge-raksha.svg)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
 </div>
